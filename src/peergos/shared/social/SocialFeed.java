@@ -71,9 +71,22 @@ public class SocialFeed {
     }
 
     @JsMethod
+    public CompletableFuture<Pair<Path, FileWrapper>> updatePost(String uuid, SocialPost post) {
+        if (! post.author.equals(context.username))
+            throw new IllegalStateException("You can only post as yourself!");
+        Path dir = getDirFromHome(post.previousVersions.get(0));
+        byte[] raw = post.serialize();
+        AsyncReader reader = AsyncReader.build(raw);
+        return context.getUserRoot()
+                .thenCompose(home -> home.getOrMkdirs(dir, context.network, true, context.crypto))
+                .thenCompose(postDir -> postDir.uploadAndReturnFile(uuid, reader, raw.length, false,
+                        context.network, context.crypto)
+                        .thenApply(f -> new Pair<>(Paths.get(post.author).resolve(dir).resolve(uuid), f)));
+    }
+    @JsMethod
     public CompletableFuture<SocialPost.Ref> uploadMediaForPost(String mediaType,
                                                                        AsyncReader media,
-                                                                       long length,
+                                                                       int length,
                                                                        LocalDateTime postTime) {
         if (! mediaType.equals("images") && ! mediaType.equals("videos") && ! mediaType.equals("audio"))
             throw new IllegalStateException("Unknown media type: " + mediaType);
@@ -83,7 +96,7 @@ public class SocialFeed {
                         context.network, context.crypto)
                         .thenCompose(f -> f.getInputStream(f.version.get(f.writer()).props, context.network, context.crypto, c -> {})
                                 .thenCompose(reader -> context.crypto.hasher.hash(reader, f.getSize()))
-                                .thenApply(hash -> new SocialPost.Ref(p.left.resolve(uuid).toString(), f.getMinimalReadPointer(), hash))));
+                                .thenApply(hash -> new SocialPost.Ref(p.left.resolve(uuid).toString(), f.readOnlyPointer(), hash))));
     }
 
     private CompletableFuture<Pair<Path, FileWrapper>> getOrMkdirToStoreMedia(String mediaType, LocalDateTime postTime) {
@@ -164,13 +177,13 @@ public class SocialFeed {
     public synchronized CompletableFuture<SocialFeed> update() {
         return context.getFollowingNodes()
                 .thenCompose(friends -> Futures.reduceAll(friends, this,
-                        (s, f) -> s.updateFriend(f, context.network), (a, b) -> b))
-                .thenCompose(x -> x.commit().thenApply(b -> x));
+                        (s, f) -> s.updateFriend(f, context.network), (a, b) -> b));
     }
 
     private synchronized CompletableFuture<SocialFeed> updateFriend(FriendSourcedTrieNode friend, NetworkAccess network) {
         ProcessedCaps current = currentCapBytesProcessed.getOrDefault(friend.ownerName, ProcessedCaps.empty());
-        return friend.getCaps(current, network)
+        return friend.updateIncludingGroups(network)
+                .thenCompose(x -> friend.getCaps(current, network))
                 .thenCompose(diff -> {
                     if (diff.isEmpty())
                         return Futures.of(this);
